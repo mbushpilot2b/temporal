@@ -698,6 +698,10 @@ var (
 	CacheTtl                                     = NewTimerDef("cache_ttl")
 	CacheEntryAgeOnGet                           = NewTimerDef("cache_entry_age_on_get")
 	CacheEntryAgeOnEviction                      = NewTimerDef("cache_entry_age_on_eviction")
+	CacheStateBasedEvictions                     = NewCounterDef(
+		"cache_state_based_evictions",
+		WithDescription("The number of workflows evicted from cache due to transitioning out of running state"),
+	)
 	HistoryEventNotificationQueueingLatency      = NewTimerDef("history_event_notification_queueing_latency")
 	HistoryEventNotificationFanoutLatency        = NewTimerDef("history_event_notification_fanout_latency")
 	HistoryEventNotificationInFlightMessageGauge = NewGaugeDef("history_event_notification_inflight_message_gauge")

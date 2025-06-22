@@ -334,11 +334,22 @@ func (c *cacheImpl) makeReleaseFunc(
 				c.Release(cacheKey)
 				panic(rec)
 			} else {
-				if err != nil || forceClearContext {
-					// TODO see issue #668, there are certain type or errors which can bypass the clear
+				shouldEvict := err != nil || forceClearContext
+				
+				// Check if state-based eviction is enabled and workflow is no longer running
+				if !shouldEvict && shardContext.GetConfig().HistoryCacheStateBasedEviction() {
+					shouldEvict = c.shouldEvictBasedOnState(wfContext, shardContext)
+				}
+
+				if shouldEvict {
 					wfContext.Clear()
 					wfContext.Unlock()
-					c.Release(cacheKey)
+					if shardContext.GetConfig().HistoryCacheStateBasedEviction() {
+						// For state-based eviction, force immediate removal from cache
+						c.Delete(cacheKey)
+					} else {
+						c.Release(cacheKey)
+					}
 				} else {
 					isDirty := wfContext.IsDirty()
 					if isDirty {
@@ -359,6 +370,55 @@ func (c *cacheImpl) makeReleaseFunc(
 			}
 		}
 	}
+}
+
+// shouldEvictBasedOnState determines if a workflow should be evicted based on its execution state
+func (c *cacheImpl) shouldEvictBasedOnState(wfContext historyi.WorkflowContext, shardContext historyi.ShardContext) bool {
+	// Cast to access the MutableState
+	contextImpl, ok := wfContext.(*workflow.ContextImpl)
+	if !ok || contextImpl.MutableState == nil {
+		// If we can't access mutable state, don't evict based on state
+		return false
+	}
+
+	mutableState := contextImpl.MutableState
+	
+	// Check if workflow execution is running
+	// IsWorkflowExecutionRunning returns false for:
+	// - WORKFLOW_EXECUTION_STATE_COMPLETED
+	// - WORKFLOW_EXECUTION_STATE_ZOMBIE  
+	// - WORKFLOW_EXECUTION_STATE_CORRUPTED
+	isRunning := mutableState.IsWorkflowExecutionRunning()
+	
+	if !isRunning {
+		// Log the eviction for observability
+		c.logStateBasedEviction(wfContext, mutableState, shardContext)
+		return true
+	}
+	
+	return false
+}
+
+// logStateBasedEviction logs when a workflow is evicted due to state change
+func (c *cacheImpl) logStateBasedEviction(wfContext historyi.WorkflowContext, mutableState historyi.MutableState, shardContext historyi.ShardContext) {
+	workflowKey := wfContext.GetWorkflowKey()
+	state, status := mutableState.GetWorkflowStateStatus()
+	
+	// Record the metric for observability
+	handler := shardContext.GetMetricsHandler().WithTags(
+		metrics.CacheTypeTag(metrics.MutableStateCacheTypeTagValue),
+		metrics.NamespaceIDTag(workflowKey.NamespaceID),
+	)
+	metrics.CacheStateBasedEvictions.With(handler).Record(1)
+	
+	log.With(shardContext.GetLogger(),
+		tag.WorkflowNamespaceID(workflowKey.NamespaceID),
+		tag.WorkflowID(workflowKey.WorkflowID),
+		tag.WorkflowRunID(workflowKey.RunID),
+		tag.WorkflowState(state),
+		tag.NewStringTag("wf-status", status.String()),
+		tag.ComponentHistoryCache,
+	).Info("Evicting workflow from cache due to state transition from running")
 }
 
 func (c *cacheImpl) validateWorkflowExecutionInfo(

@@ -1400,6 +1400,13 @@ will wait on workflow lock acquisition. Requires service restart to take effect.
 		`HistoryCacheHostLevelMaxSizeBytes is the maximum size of the host level history cache. This is only used if
 HistoryCacheSizeBasedLimit is set to true.`,
 	)
+	HistoryCacheStateBasedEviction = NewGlobalBoolSetting(
+		"history.cacheStateBasedEviction",
+		false,
+		`HistoryCacheStateBasedEviction controls whether to evict workflows from cache immediately when they
+transition out of running state (completed, terminated, failed, etc.). This helps reduce memory usage by
+ensuring only active workflows remain cached.`,
+	)
 	EnableWorkflowExecutionTimeoutTimer = NewGlobalBoolSetting(
 		"history.enableWorkflowExecutionTimeoutTimer",
 		true,

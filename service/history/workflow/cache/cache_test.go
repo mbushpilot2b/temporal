@@ -867,3 +867,86 @@ func (s *workflowCacheSuite) TestCacheImpl_GetCurrentRunID_NoCurrentRun() {
 	s.Nil(ctx)
 	s.Nil(release)
 }
+
+func (s *workflowCacheSuite) TestHistoryCacheStateBasedEviction() {
+	// Configure state-based eviction before creating cache
+	config := s.mockShard.GetConfig()
+	config.HistoryCacheStateBasedEviction = dynamicconfig.GetBoolPropertyFn(true)
+	
+	s.cache = NewHostLevelCache(config, s.mockShard.GetLogger(), metrics.NoopMetricsHandler)
+
+	namespaceID := namespace.ID("test_namespace_id")
+	workflowID := "workflow-id"
+	runID := uuid.New()
+	execution := &commonpb.WorkflowExecution{
+		WorkflowId: workflowID,
+		RunId:      runID,
+	}
+
+	// Create a mock mutable state
+	mockMS := historyi.NewMockMutableState(s.controller)
+	mockMS.EXPECT().IsDirty().Return(false).AnyTimes()
+	mockMS.EXPECT().GetQueryRegistry().Return(workflow.NewQueryRegistry()).AnyTimes()
+	mockMS.EXPECT().RemoveSpeculativeWorkflowTaskTimeoutTask().AnyTimes()
+	
+	// Get workflow from cache
+	wfCtx, releaseFunc, err := s.cache.GetOrCreateWorkflowExecution(
+		context.Background(),
+		s.mockShard,
+		namespaceID,
+		execution,
+		locks.PriorityHigh,
+	)
+	s.NoError(err)
+	s.NotNil(wfCtx)
+	s.NotNil(releaseFunc)
+
+	// Set the mock mutable state
+	wfCtx.(*workflow.ContextImpl).MutableState = mockMS
+
+	// Create cache key to check if workflow is evicted
+	cacheKey := Key{
+		WorkflowKey: definition.NewWorkflowKey(namespaceID.String(), workflowID, runID),
+		ShardUUID:   s.mockShard.GetOwner(),
+	}
+
+	// Cast the cache to access the Get method from the underlying cache implementation
+	cacheImpl := s.cache.(*cacheImpl)
+
+	// Initially, the workflow should be in cache
+	item := cacheImpl.Get(cacheKey)
+	s.NotNil(item)
+
+	// Test case 1: Running workflow should NOT be evicted
+	mockMS.EXPECT().IsWorkflowExecutionRunning().Return(true).Times(1)
+	releaseFunc(nil)
+	
+	// Should still be in cache since it's running
+	item = cacheImpl.Get(cacheKey)
+	s.NotNil(item, "Running workflow should remain in cache")
+
+	// Get the workflow again for the second test
+	wfCtx2, releaseFunc2, err := s.cache.GetOrCreateWorkflowExecution(
+		context.Background(),
+		s.mockShard,
+		namespaceID,
+		execution,
+		locks.PriorityHigh,
+	)
+	s.NoError(err)
+	wfCtx2.(*workflow.ContextImpl).MutableState = mockMS
+
+	// Test case 2: Completed workflow SHOULD be evicted
+	mockMS.EXPECT().IsWorkflowExecutionRunning().Return(false).Times(1)
+	mockMS.EXPECT().GetWorkflowStateStatus().Return(
+		enumsspb.WORKFLOW_EXECUTION_STATE_COMPLETED,
+		enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED,
+	).Times(1)
+
+	// Release the workflow - this should trigger state-based eviction
+	releaseFunc2(nil)
+
+	// After release, since workflow is completed, it should be evicted from cache
+	item = cacheImpl.Get(cacheKey)
+	s.Nil(item, "Completed workflow should be evicted from cache")
+}
